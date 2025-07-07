@@ -121,6 +121,7 @@ async function handleBumpDetection(user) {
         if (userRecord && userRecord.minecraft_username) {
             // User exists with Minecraft username
             await sendBumpRewardMessage(user, userRecord.minecraft_username);
+            await sendConsoleCommand(userRecord.minecraft_username);
         } else {
             // User doesn't exist or doesn't have Minecraft username
             await promptForMinecraftUsername(user);
@@ -218,6 +219,22 @@ async function sendBumpRewardMessage(user, minecraftUsername) {
     }
 }
 
+async function sendConsoleCommand(minecraftUsername) {
+    try {
+        const consoleChannel = client.channels.cache.get(CONSOLE_CHANNEL_ID);
+        if (!consoleChannel) {
+            console.error('Console channel not found');
+            return;
+        }
+        
+        const command = `eco give ${minecraftUsername} 10`;
+        await consoleChannel.send(command);
+        console.log(`💰 Sent console command: ${command}`);
+    } catch (error) {
+        console.error('Error sending console command:', error);
+    }
+}
+
 async function promptForMinecraftUsername(user) {
     try {
         const modal = new ModalBuilder()
@@ -304,8 +321,9 @@ async function handleMinecraftUsernameSubmission(interaction) {
             ephemeral: true
         });
         
-        // Send bump reward message
+        // Send bump reward message and console command
         await sendBumpRewardMessage(user, minecraftUsername);
+        await sendConsoleCommand(minecraftUsername);
         
         console.log(`✅ Added/Updated Minecraft username for ${user.tag}: ${minecraftUsername}`);
     } catch (error) {
