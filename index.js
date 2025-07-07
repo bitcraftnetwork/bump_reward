@@ -56,9 +56,16 @@ client.on('interactionCreate', async (interaction) => {
 // Listen for bump bot responses to detect who bumped
 client.on('messageCreate', async (message) => {
     if (message.channel.id !== BUMP_CHANNEL_ID) return;
-    if (!message.author.bot) return;
     
-    await detectBumpBotResponse(message);
+    // Handle user commands (non-bot messages starting with !)
+    if (!message.author.bot && message.content.startsWith('!')) {
+        return handleUserCommands(message);
+    }
+    
+    // Handle bot messages for bump detection
+    if (message.author.bot) {
+        await detectBumpBotResponse(message);
+    }
 });
 
 async function detectBumpBotResponse(message) {
@@ -335,45 +342,88 @@ async function handleMinecraftUsernameSubmission(interaction) {
     }
 }
 
-// Add slash command for users to set their Minecraft username
-client.on('interactionCreate', async (interaction) => {
-    if (!interaction.isCommand()) return;
+async function handleUserCommands(message) {
+    const args = message.content.slice(1).trim().split(/ +/);
+    const command = args.shift().toLowerCase();
     
-    if (interaction.commandName === 'minecraft') {
-        const minecraftUsername = interaction.options.getString('username');
-        
-        if (!/^[a-zA-Z0-9_]{3,16}$/.test(minecraftUsername)) {
-            await interaction.reply({
-                content: '❌ Invalid Minecraft username! It should be 3-16 characters long and contain only letters, numbers, and underscores.',
-                ephemeral: true
-            });
-            return;
-        }
-        
-        try {
-            const existingUser = await getUserFromNocoDB(interaction.user.id);
-            
-            if (existingUser) {
-                await updateUserInNocoDB(existingUser.Id, minecraftUsername);
-            } else {
-                await addUserToNocoDB(interaction.user.id, interaction.user.tag, minecraftUsername);
-            }
-            
-            await interaction.reply({
-                content: `✅ Successfully saved your Minecraft username: **${minecraftUsername}**`,
-                ephemeral: true
-            });
-            
-            console.log(`✅ User ${interaction.user.tag} set Minecraft username: ${minecraftUsername}`);
-        } catch (error) {
-            console.error('Error setting Minecraft username:', error);
-            await interaction.reply({
-                content: '❌ An error occurred while saving your username. Please try again later.',
-                ephemeral: true
-            });
-        }
+    if (command === 'minecraft') {
+        await handleMinecraftCommand(message, args);
     }
-});
+}
+
+async function handleMinecraftCommand(message, args) {
+    try {
+        if (args.length === 0) {
+            const embed = new EmbedBuilder()
+                .setColor('#FFA500')
+                .setTitle('❌ Missing Username')
+                .setDescription('Please provide your Minecraft username!')
+                .addFields(
+                    { name: '📝 Usage', value: '`!minecraft <username>`' },
+                    { name: '📖 Example', value: '`!minecraft Steve123`' }
+                )
+                .setTimestamp();
+            
+            return message.reply({ embeds: [embed] });
+        }
+        
+        const minecraftUsername = args[0];
+        
+        // Validate Minecraft username
+        if (!/^[a-zA-Z0-9_]{3,16}$/.test(minecraftUsername)) {
+            const embed = new EmbedBuilder()
+                .setColor('#FF0000')
+                .setTitle('❌ Invalid Username')
+                .setDescription('Minecraft usernames must be 3-16 characters long and contain only letters, numbers, and underscores.')
+                .addFields(
+                    { name: '📝 Valid Examples', value: '`Steve`, `Notch`, `Player123`, `Cool_Gamer`' },
+                    { name: '❌ Invalid Examples', value: '`AB`, `ThisNameIsTooLong123`, `Player-123`, `User@123`' }
+                )
+                .setTimestamp();
+            
+            return message.reply({ embeds: [embed] });
+        }
+        
+        // Check if user already exists in database
+        const existingUser = await getUserFromNocoDB(message.author.id);
+        
+        if (existingUser) {
+            // Update existing user
+            await updateUserInNocoDB(existingUser.Id, minecraftUsername);
+        } else {
+            // Add new user
+            await addUserToNocoDB(message.author.id, message.author.tag, minecraftUsername);
+        }
+        
+        // Send success message
+        const embed = new EmbedBuilder()
+            .setColor('#00FF00')
+            .setTitle('✅ Success!')
+            .setDescription(`Successfully saved your Minecraft username: **${minecraftUsername}**`)
+            .addFields(
+                { name: '🎮 Username Set', value: minecraftUsername, inline: true },
+                { name: '👤 Discord User', value: message.author.tag, inline: true },
+                { name: '📝 Next Step', value: 'Bump the server to get your rewards!' }
+            )
+            .setThumbnail(message.author.displayAvatarURL({ dynamic: true }))
+            .setTimestamp()
+            .setFooter({ text: 'Minecraft Tracker Bot' });
+        
+        await message.reply({ embeds: [embed] });
+        
+        console.log(`✅ User ${message.author.tag} set Minecraft username via !minecraft: ${minecraftUsername}`);
+    } catch (error) {
+        console.error('Error handling !minecraft command:', error);
+        
+        const embed = new EmbedBuilder()
+            .setColor('#FF0000')
+            .setTitle('❌ Error')
+            .setDescription('An error occurred while saving your username. Please try again later.')
+            .setTimestamp();
+        
+        await message.reply({ embeds: [embed] });
+    }
+}
 
 // Health check endpoints
 app.get('/', (req, res) => {
