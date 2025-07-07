@@ -234,7 +234,7 @@ async function sendConsoleCommand(minecraftUsername) {
             return;
         }
         
-        const command = `crate give ${minecraftUsername} balanced 1`;
+        const command = `crate key give ${minecraftUsername} balanced 1`;
         const command1 = `tempfly give ${minecraftUsername} 3m`;
         await consoleChannel.send(command);
         await consoleChannel.send(command1);
