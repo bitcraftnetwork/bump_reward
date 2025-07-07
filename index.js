@@ -211,7 +211,7 @@ async function sendBumpRewardMessage(user, minecraftUsername) {
             .setTitle('🎮 Bump Detected - User Found!')
             .setDescription(`User ${user.tag} has bumped the server`)
             .addFields(
-                { name: '👤 Discord User', value: `${user.tag} (${user.id})`, inline: true },
+            //  { name: '👤 Discord User', value: `${user.tag} (${user.id})`, inline: true },
                 { name: '🎯 Minecraft Username', value: minecraftUsername, inline: true },
                 { name: '⏰ Time', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
             )
@@ -234,8 +234,10 @@ async function sendConsoleCommand(minecraftUsername) {
             return;
         }
         
-        const command = `eco give ${minecraftUsername} 10`;
+        const command = `crate give ${minecraftUsername} balanced 1`;
+        const command1 = `tempfly give ${minecraftUsername} 3m`;
         await consoleChannel.send(command);
+        await consoleChannel.send(command1);
         console.log(`💰 Sent console command: ${command}`);
     } catch (error) {
         console.error('Error sending console command:', error);
