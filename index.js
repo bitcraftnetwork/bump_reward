@@ -8,7 +8,8 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildMessageReactions
+        GatewayIntentBits.GuildMessageReactions,
+        GatewayIntentBits.GuildMembers // Added for role management
     ]
 });
 
@@ -25,6 +26,9 @@ const NOCODB_TABLE_ID = process.env.NOCODB_TABLE_ID;
 const NOCODB_WORKSPACE_ID = process.env.NOCODB_WORKSPACE_ID;
 const NOCODB_BASE_ID = process.env.NOCODB_BASE_ID;
 
+// Role configuration
+const BUMP_ROLE_ID = '1382278107024851005'; // The role ID to assign
+
 // NocoDB API configuration
 const nocodbConfig = {
     headers: {
@@ -38,6 +42,7 @@ client.once('ready', async () => {
     console.log(`📡 Monitoring bump channel: ${BUMP_CHANNEL_ID}`);
     console.log(`🖥️ Console channel: ${CONSOLE_CHANNEL_ID}`);
     console.log(`🗄️ NocoDB configured: ${NOCODB_BASE_URL ? 'Yes' : 'No'}`);
+    console.log(`🎭 Bump role ID: ${BUMP_ROLE_ID}`);
 });
 
 // Listen for bump commands
@@ -198,6 +203,30 @@ async function updateUserInNocoDB(recordId, minecraftUsername) {
     }
 }
 
+async function assignBumpRole(user, guild) {
+    try {
+        const member = await guild.members.fetch(user.id);
+        const role = guild.roles.cache.get(BUMP_ROLE_ID);
+        
+        if (!role) {
+            console.error(`❌ Bump role not found: ${BUMP_ROLE_ID}`);
+            return false;
+        }
+        
+        if (member.roles.cache.has(BUMP_ROLE_ID)) {
+            console.log(`👤 User ${user.tag} already has bump role`);
+            return true;
+        }
+        
+        await member.roles.add(role);
+        console.log(`✅ Assigned bump role to ${user.tag}`);
+        return true;
+    } catch (error) {
+        console.error(`❌ Error assigning bump role to ${user.tag}:`, error);
+        return false;
+    }
+}
+
 async function sendBumpRewardMessage(user, minecraftUsername) {
     try {
         const bumpChannel = client.channels.cache.get(BUMP_CHANNEL_ID);
@@ -209,7 +238,7 @@ async function sendBumpRewardMessage(user, minecraftUsername) {
         const embed = new EmbedBuilder()
             .setColor('#00FF00')
             .setTitle('🎮 Bump Detected - User Found!')
-            .setDescription(`User ${user.tag} has bumped the server`)
+            .setDescription(`User ${user} has bumped the server`)
             .addFields(
             //  { name: '👤 Discord User', value: `${user.tag} (${user.id})`, inline: true },
                 { name: '🎯 Minecraft Username', value: minecraftUsername, inline: true },
@@ -284,11 +313,11 @@ async function promptForMinecraftUsername(user) {
                 .setTitle('🎮 Minecraft Username Required')
                 .setDescription(`${user}, thanks for bumping! We need your Minecraft username to track your contribution.`)
                 .addFields(
-                    { name: '📝 Next Steps', value: 'Please use the `/minecraft` command to set your username' },
+                    { name: '📝 Next Steps', value: 'Please use the `!minecraft` command to set your username' },
                     { name: '❓ Why?', value: 'This helps us track server bumps and reward active members' }
                 )
                 .setTimestamp()
-                .setFooter({ text: 'Use /minecraft <username> to set your username' });
+                .setFooter({ text: 'Use !minecraft <username> to set your username' });
             
             await bumpChannel.send({ content: `${user}`, embeds: [embed] });
         }
@@ -324,9 +353,19 @@ async function handleMinecraftUsernameSubmission(interaction) {
             await addUserToNocoDB(user.id, user.tag, minecraftUsername);
         }
         
+        // Assign bump role
+        const guild = interaction.guild;
+        const roleAssigned = await assignBumpRole(user, guild);
+        
         // Send success message
+        let successMessage = `✅ Successfully saved your Minecraft username: **${minecraftUsername}**\n\nNext time you bump, we'll automatically track it!`;
+        
+        if (roleAssigned) {
+            successMessage += `\n🎭 You've been assigned the bump role!`;
+        }
+        
         await interaction.reply({
-            content: `✅ Successfully saved your Minecraft username: **${minecraftUsername}**\n\nNext time you bump, we'll automatically track it!`,
+            content: successMessage,
             ephemeral: true
         });
         
@@ -397,16 +436,25 @@ async function handleMinecraftCommand(message, args) {
             await addUserToNocoDB(message.author.id, message.author.tag, minecraftUsername);
         }
         
+        // Assign bump role
+        const guild = message.guild;
+        const roleAssigned = await assignBumpRole(message.author, guild);
+        
         // Send success message
+        const embedFields = [
+            { name: '🎮 Username Set', value: minecraftUsername, inline: true },
+            { name: '📝 Next Step', value: 'Bump the server to get your rewards!' }
+        ];
+        
+        if (roleAssigned) {
+            embedFields.push({ name: '🎭 Role Assigned', value: 'Bump Role', inline: true });
+        }
+        
         const embed = new EmbedBuilder()
             .setColor('#00FF00')
             .setTitle('✅ Success!')
             .setDescription(`Successfully saved your Minecraft username: **${minecraftUsername}**`)
-            .addFields(
-                { name: '🎮 Username Set', value: minecraftUsername, inline: true },
-                { name: '👤 Discord User', value: message.author.tag, inline: true },
-                { name: '📝 Next Step', value: 'Bump the server to get your rewards!' }
-            )
+            .addFields(embedFields)
             .setThumbnail(message.author.displayAvatarURL({ dynamic: true }))
             .setTimestamp()
             .setFooter({ text: 'Minecraft Tracker Bot' });
