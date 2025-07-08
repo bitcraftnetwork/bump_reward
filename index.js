@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ButtonBuilder, ButtonStyle } = require('discord.js');
 const express = require('express');
 const axios = require('axios');
 require('dotenv').config();
@@ -29,6 +29,9 @@ const NOCODB_BASE_ID = process.env.NOCODB_BASE_ID;
 // Role configuration
 const BUMP_ROLE_ID = '1382278107024851005'; // The role ID to assign
 
+// Store pending role assignments with timeout
+const pendingRoleAssignments = new Map();
+
 // NocoDB API configuration
 const nocodbConfig = {
     headers: {
@@ -55,6 +58,15 @@ client.on('interactionCreate', async (interaction) => {
     
     if (interaction.isModalSubmit() && interaction.customId === 'minecraft_username_modal') {
         await handleMinecraftUsernameSubmission(interaction);
+    }
+    
+    // Handle role assignment confirmation buttons
+    if (interaction.isButton()) {
+        if (interaction.customId === 'confirm_role_assignment') {
+            await handleRoleConfirmation(interaction, true);
+        } else if (interaction.customId === 'decline_role_assignment') {
+            await handleRoleConfirmation(interaction, false);
+        }
     }
 });
 
@@ -227,6 +239,169 @@ async function assignBumpRole(user, guild) {
     }
 }
 
+async function requestRoleAssignmentConfirmation(user, guild, minecraftUsername) {
+    try {
+        const bumpChannel = client.channels.cache.get(BUMP_CHANNEL_ID);
+        if (!bumpChannel) {
+            console.error('Bump channel not found');
+            return;
+        }
+        
+        const confirmButton = new ButtonBuilder()
+            .setCustomId('confirm_role_assignment')
+            .setLabel('Yes, assign role')
+            .setStyle(ButtonStyle.Success)
+            .setEmoji('✅');
+        
+        const declineButton = new ButtonBuilder()
+            .setCustomId('decline_role_assignment')
+            .setLabel('No, skip role')
+            .setStyle(ButtonStyle.Secondary)
+            .setEmoji('❌');
+        
+        const row = new ActionRowBuilder()
+            .addComponents(confirmButton, declineButton);
+        
+        const embed = new EmbedBuilder()
+            .setColor('#FFA500')
+            .setTitle('🎭 Role Assignment Confirmation')
+            .setDescription(`${user}, would you like to receive the **Bump Role**?`)
+            .addFields(
+                { name: '🎯 Benefits', value: 'Get notified about server events and special perks for active bumpers!' },
+                { name: '⏱️ Time Limit', value: 'You have 120 seconds to respond. No response = no role assigned.' }
+            )
+            .setThumbnail(user.displayAvatarURL({ dynamic: true }))
+            .setTimestamp()
+            .setFooter({ text: 'Choose wisely!' });
+        
+        const message = await bumpChannel.send({ 
+            content: `${user}`,
+            embeds: [embed], 
+            components: [row] 
+        });
+        
+        // Store pending assignment with timeout
+        const timeoutId = setTimeout(async () => {
+            await handleRoleTimeout(user.id, message);
+        }, 120000); // 120 seconds
+        
+        pendingRoleAssignments.set(user.id, {
+            guild: guild,
+            minecraftUsername: minecraftUsername,
+            message: message,
+            timeoutId: timeoutId
+        });
+        
+        console.log(`⏰ Role assignment confirmation requested for ${user.tag}`);
+    } catch (error) {
+        console.error('Error requesting role assignment confirmation:', error);
+    }
+}
+
+async function handleRoleConfirmation(interaction, confirmed) {
+    try {
+        const userId = interaction.user.id;
+        const pendingAssignment = pendingRoleAssignments.get(userId);
+        
+        if (!pendingAssignment) {
+            await interaction.reply({
+                content: '❌ No pending role assignment found or it has expired.',
+                ephemeral: true
+            });
+            return;
+        }
+        
+        // Clear the timeout
+        clearTimeout(pendingAssignment.timeoutId);
+        pendingRoleAssignments.delete(userId);
+        
+        if (confirmed) {
+            // Assign the role
+            const roleAssigned = await assignBumpRole(interaction.user, pendingAssignment.guild);
+            
+            if (roleAssigned) {
+                const embed = new EmbedBuilder()
+                    .setColor('#00FF00')
+                    .setTitle('✅ Role Assigned Successfully!')
+                    .setDescription(`Welcome to the bump team, ${interaction.user}! 🎉`)
+                    .addFields(
+                        { name: '🎭 Role', value: 'Bump Role', inline: true },
+                        { name: '🎮 Minecraft Username', value: pendingAssignment.minecraftUsername, inline: true }
+                    )
+                    .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true }))
+                    .setTimestamp();
+                
+                await interaction.update({ embeds: [embed], components: [] });
+                
+                // Send bump reward message and console command
+                await sendBumpRewardMessage(interaction.user, pendingAssignment.minecraftUsername);
+                await sendConsoleCommand(pendingAssignment.minecraftUsername);
+            } else {
+                await interaction.update({
+                    content: '❌ Failed to assign role. Please contact an administrator.',
+                    embeds: [],
+                    components: []
+                });
+            }
+        } else {
+            // User declined the role
+            const embed = new EmbedBuilder()
+                .setColor('#808080')
+                .setTitle('👋 Role Assignment Declined')
+                .setDescription(`No problem, ${interaction.user}! You can always ask for the role later.`)
+                .addFields(
+                    { name: '🎮 Minecraft Username', value: pendingAssignment.minecraftUsername, inline: true },
+                    { name: '💡 Note', value: 'Your username is still saved and you\'ll get rewards for bumping!' }
+                )
+                .setTimestamp();
+            
+            await interaction.update({ embeds: [embed], components: [] });
+            
+            // Still send bump reward message and console command even if role is declined
+            await sendBumpRewardMessage(interaction.user, pendingAssignment.minecraftUsername);
+            await sendConsoleCommand(pendingAssignment.minecraftUsername);
+        }
+        
+        console.log(`🎭 Role assignment ${confirmed ? 'confirmed' : 'declined'} by ${interaction.user.tag}`);
+    } catch (error) {
+        console.error('Error handling role confirmation:', error);
+        await interaction.reply({
+            content: '❌ An error occurred while processing your response.',
+            ephemeral: true
+        });
+    }
+}
+
+async function handleRoleTimeout(userId, message) {
+    try {
+        const pendingAssignment = pendingRoleAssignments.get(userId);
+        if (!pendingAssignment) return;
+        
+        pendingRoleAssignments.delete(userId);
+        
+        const embed = new EmbedBuilder()
+            .setColor('#FF6B6B')
+            .setTitle('⏰ Role Assignment Timed Out')
+            .setDescription('No response received within 120 seconds. Role assignment skipped.')
+            .addFields(
+                { name: '🎮 Minecraft Username', value: pendingAssignment.minecraftUsername, inline: true },
+                { name: '💡 Note', value: 'You can still get the role by using the `!minecraft` command again!' }
+            )
+            .setTimestamp();
+        
+        await message.edit({ embeds: [embed], components: [] });
+        
+        // Still send bump reward message and console command even if timeout occurred
+        const user = await client.users.fetch(userId);
+        await sendBumpRewardMessage(user, pendingAssignment.minecraftUsername);
+        await sendConsoleCommand(pendingAssignment.minecraftUsername);
+        
+        console.log(`⏰ Role assignment timed out for user ID: ${userId}`);
+    } catch (error) {
+        console.error('Error handling role timeout:', error);
+    }
+}
+
 async function sendBumpRewardMessage(user, minecraftUsername) {
     try {
         const bumpChannel = client.channels.cache.get(BUMP_CHANNEL_ID);
@@ -240,7 +415,6 @@ async function sendBumpRewardMessage(user, minecraftUsername) {
             .setTitle('🎮 Bump Detected - User Found!')
             .setDescription(`User ${user} has bumped the server`)
             .addFields(
-            //  { name: '👤 Discord User', value: `${user.tag} (${user.id})`, inline: true },
                 { name: '🎯 Minecraft Username', value: minecraftUsername, inline: true },
                 { name: '⏰ Time', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
             )
@@ -353,25 +527,14 @@ async function handleMinecraftUsernameSubmission(interaction) {
             await addUserToNocoDB(user.id, user.tag, minecraftUsername);
         }
         
-        // Assign bump role
-        const guild = interaction.guild;
-        const roleAssigned = await assignBumpRole(user, guild);
-        
         // Send success message
-        let successMessage = `✅ Successfully saved your Minecraft username: **${minecraftUsername}**\n\nNext time you bump, we'll automatically track it!`;
-        
-        if (roleAssigned) {
-            successMessage += `\n🎭 You've been assigned the bump role!`;
-        }
-        
         await interaction.reply({
-            content: successMessage,
+            content: `✅ Successfully saved your Minecraft username: **${minecraftUsername}**\n\nNext time you bump, we'll automatically track it!`,
             ephemeral: true
         });
         
-        // Send bump reward message and console command
-        await sendBumpRewardMessage(user, minecraftUsername);
-        await sendConsoleCommand(minecraftUsername);
+        // Request role assignment confirmation
+        await requestRoleAssignmentConfirmation(user, interaction.guild, minecraftUsername);
         
         console.log(`✅ Added/Updated Minecraft username for ${user.tag}: ${minecraftUsername}`);
     } catch (error) {
@@ -436,30 +599,23 @@ async function handleMinecraftCommand(message, args) {
             await addUserToNocoDB(message.author.id, message.author.tag, minecraftUsername);
         }
         
-        // Assign bump role
-        const guild = message.guild;
-        const roleAssigned = await assignBumpRole(message.author, guild);
-        
         // Send success message
-        const embedFields = [
-            { name: '🎮 Username Set', value: minecraftUsername, inline: true },
-            { name: '📝 Next Step', value: 'Bump the server to get your rewards!' }
-        ];
-        
-        if (roleAssigned) {
-            embedFields.push({ name: '🎭 Role Assigned', value: 'Bump Role', inline: true });
-        }
-        
         const embed = new EmbedBuilder()
             .setColor('#00FF00')
             .setTitle('✅ Success!')
             .setDescription(`Successfully saved your Minecraft username: **${minecraftUsername}**`)
-            .addFields(embedFields)
+            .addFields(
+                { name: '🎮 Username Set', value: minecraftUsername, inline: true },
+                { name: '📝 Next Step', value: 'Bump the server to get your rewards!' }
+            )
             .setThumbnail(message.author.displayAvatarURL({ dynamic: true }))
             .setTimestamp()
             .setFooter({ text: 'Minecraft Tracker Bot' });
         
         await message.reply({ embeds: [embed] });
+        
+        // Request role assignment confirmation
+        await requestRoleAssignmentConfirmation(message.author, message.guild, minecraftUsername);
         
         console.log(`✅ User ${message.author.tag} set Minecraft username via !minecraft: ${minecraftUsername}`);
     } catch (error) {
