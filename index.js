@@ -33,7 +33,9 @@ const BUMP_ROLE_ID = ‘1382278107024851005’; // The role ID to assign
 const pendingRoleAssignments = new Map();
 
 // Hidden users configuration - Discord user IDs whose Minecraft usernames should be hidden
-const HIDDEN_USERS = [
+// You can also use environment variable: process.env.HIDDEN_USERS (comma-separated)
+const HIDDEN_USERS = process.env.HIDDEN_USERS ?
+process.env.HIDDEN_USERS.split(’,’).map(id => id.trim()) : [
 “123456789012345678”, // Replace with actual Discord user IDs
 “987654321098765432”, // Add more user IDs as needed
 “111222333444555666”  // These users’ Minecraft usernames will be hidden from public messages
@@ -247,10 +249,24 @@ nocodbConfig
 
 async function assignBumpRole(user, guild) {
 try {
-const member = await guild.members.fetch(user.id);
-const role = guild.roles.cache.get(BUMP_ROLE_ID);
+if (!guild) {
+console.error(‘❌ Guild not provided for role assignment’);
+return false;
+}
 
 ```
+    const member = await guild.members.fetch(user.id).catch(err => {
+        console.error(`❌ Could not fetch member ${user.tag}:`, err.message);
+        return null;
+    });
+    
+    if (!member) {
+        console.error(`❌ Member not found: ${user.tag}`);
+        return false;
+    }
+    
+    const role = guild.roles.cache.get(BUMP_ROLE_ID);
+    
     if (!role) {
         console.error(`❌ Bump role not found: ${BUMP_ROLE_ID}`);
         return false;
@@ -265,7 +281,7 @@ const role = guild.roles.cache.get(BUMP_ROLE_ID);
     console.log(`✅ Assigned bump role to ${user.tag}`);
     return true;
 } catch (error) {
-    console.error(`❌ Error assigning bump role to ${user.tag}:`, error);
+    console.error(`❌ Error assigning bump role to ${user.tag}:`, error.message);
     return false;
 }
 ```
@@ -281,9 +297,18 @@ return;
 }
 
 ```
+    if (!guild) {
+        console.error('Guild not provided for role confirmation');
+        return;
+    }
+    
     // Check if user already has the role
-    const member = await guild.members.fetch(user.id);
-    if (member.roles.cache.has(BUMP_ROLE_ID)) {
+    const member = await guild.members.fetch(user.id).catch(err => {
+        console.error(`Could not fetch member for role check: ${err.message}`);
+        return null;
+    });
+    
+    if (member && member.roles.cache.has(BUMP_ROLE_ID)) {
         console.log(`👤 User ${user.tag} already has bump role, skipping confirmation`);
         return;
     }
@@ -322,10 +347,10 @@ return;
         components: [row] 
     });
     
-    // Store pending assignment with timeout
+    // Store pending assignment with shorter timeout for free tier
     const timeoutId = setTimeout(async () => {
         await handleRoleTimeout(user.id, message);
-    }, 120000); // 120 seconds
+    }, 90000); // 90 seconds instead of 120 to be safer
     
     pendingRoleAssignments.set(user.id, {
         guild: guild,
@@ -336,7 +361,7 @@ return;
     
     console.log(`⏰ Role assignment confirmation requested for ${user.tag}`);
 } catch (error) {
-    console.error('Error requesting role assignment confirmation:', error);
+    console.error('Error requesting role assignment confirmation:', error.message);
 }
 ```
 
@@ -383,14 +408,14 @@ const pendingAssignment = pendingRoleAssignments.get(userId);
             await sendBumpRewardMessage(interaction.user, pendingAssignment.minecraftUsername, isHiddenUser);
             await sendConsoleCommand(pendingAssignment.minecraftUsername);
             
-            // Delete the message after 10 seconds
+            // Delete the message after 5 seconds instead of 10
             setTimeout(async () => {
                 try {
                     await interaction.message.delete();
                 } catch (error) {
                     console.log('Could not delete role confirmation message:', error.message);
                 }
-            }, 10000);
+            }, 5000);
         } else {
             await interaction.update({
                 content: '❌ Failed to assign role. Please contact an administrator.',
@@ -416,14 +441,14 @@ const pendingAssignment = pendingRoleAssignments.get(userId);
         await sendBumpRewardMessage(interaction.user, pendingAssignment.minecraftUsername, isHiddenUser);
         await sendConsoleCommand(pendingAssignment.minecraftUsername);
         
-        // Delete the message after 10 seconds
+        // Delete the message after 5 seconds instead of 10
         setTimeout(async () => {
             try {
                 await interaction.message.delete();
             } catch (error) {
                 console.log('Could not delete role confirmation message:', error.message);
             }
-        }, 10000);
+        }, 5000);
     }
     
     console.log(`🎭 Role assignment ${confirmed ? 'confirmed' : 'declined'} by ${interaction.user.tag}`);
@@ -463,14 +488,14 @@ if (!pendingAssignment) return;
     await sendBumpRewardMessage(user, pendingAssignment.minecraftUsername, isHiddenUser);
     await sendConsoleCommand(pendingAssignment.minecraftUsername);
     
-    // Delete the message after 10 seconds
+    // Delete the message after 5 seconds instead of 10
     setTimeout(async () => {
         try {
             await message.delete();
         } catch (error) {
             console.log('Could not delete timeout message:', error.message);
         }
-    }, 10000);
+    }, 5000);
     
     console.log(`⏰ Role assignment timed out for user ID: ${userId}`);
 } catch (error) {
@@ -553,14 +578,14 @@ const embed = new EmbedBuilder()
 ```
         const message = await bumpChannel.send({ content: `${user}`, embeds: [embed] });
         
-        // Delete the message after 2 minutes
+        // Delete the message after 1 minute instead of 2 minutes
         setTimeout(async () => {
             try {
                 await message.delete();
             } catch (error) {
                 console.log('Could not delete prompt message:', error.message);
             }
-        }, 120000);
+        }, 60000);
     }
     
     console.log(`❓ Prompted ${user.tag} for Minecraft username`);
@@ -721,14 +746,14 @@ console.log(‘Could not delete command message:’, error.message);
     
     const reply = await message.channel.send({ embeds: [embed] });
     
-    // Delete the success message after 1 minute
+    // Delete the success message after 30 seconds instead of 1 minute
     setTimeout(async () => {
         try {
             await reply.delete();
         } catch (error) {
             console.log('Could not delete success message:', error.message);
         }
-    }, 60000);
+    }, 30000);
     
     // Request role assignment confirmation (only for new users or users without the role)
     if (!isUpdate || !await checkUserHasRole(message.author, message.guild)) {
@@ -762,10 +787,14 @@ console.log(‘Could not delete command message:’, error.message);
 
 async function checkUserHasRole(user, guild) {
 try {
-const member = await guild.members.fetch(user.id);
-return member.roles.cache.has(BUMP_ROLE_ID);
+if (!guild) return false;
+const member = await guild.members.fetch(user.id).catch(err => {
+console.error(‘Error fetching member for role check:’, err.message);
+return null;
+});
+return member ? member.roles.cache.has(BUMP_ROLE_ID) : false;
 } catch (error) {
-console.error(‘Error checking user role:’, error);
+console.error(‘Error checking user role:’, error.message);
 return false;
 }
 }
