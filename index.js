@@ -1,20 +1,14 @@
-const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const express = require('express');
 const axios = require('axios');
 require('dotenv').config();
 
-const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildMessageReactions,
-        GatewayIntentBits.GuildMembers
-    ]
-});
-
+// Initialize Express app first for health checks
 const app = express();
-const PORT = process.env.PORT || 3000; // Render uses PORT environment variable
+const PORT = process.env.PORT || 10000; // Render uses port 10000
+
+// Middleware
+app.use(express.json());
 
 // Environment variables
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
@@ -25,12 +19,17 @@ const NOCODB_API_TOKEN = process.env.NOCODB_API_TOKEN;
 const NOCODB_TABLE_ID = process.env.NOCODB_TABLE_ID;
 const NOCODB_WORKSPACE_ID = process.env.NOCODB_WORKSPACE_ID;
 const NOCODB_BASE_ID = process.env.NOCODB_BASE_ID;
+const BUMP_ROLE_ID = process.env.BUMP_ROLE_ID || '1382278107024851005';
 
-// Role configuration
-const BUMP_ROLE_ID = '1382278107024851005';
+// Hidden users configuration - Discord user IDs whose Minecraft usernames should be hidden
+const HIDDEN_USERS = [
+    // Add Discord user IDs here whose Minecraft usernames should be hidden from public messages
+    // Example: "123456789012345678",
+    // Example: "987654321098765432",
+    // Example: "111222333444555666"
+];
 
-// In-memory storage for pending role assignments (instead of persistent storage)
-// This will reset on each deployment, which is expected behavior for free tier
+// In-memory storage for pending role assignments (will reset on restart)
 const pendingRoleAssignments = new Map();
 
 // NocoDB API configuration
@@ -38,53 +37,63 @@ const nocodbConfig = {
     headers: {
         'xc-token': NOCODB_API_TOKEN,
         'Content-Type': 'application/json'
-    },
-    timeout: 10000 // 10 second timeout to prevent hanging requests
+    }
 };
 
-// Graceful shutdown handling for Render
-process.on('SIGTERM', () => {
-    console.log('🔄 SIGTERM received, shutting down gracefully...');
-    client.destroy();
-    process.exit(0);
+// Initialize Discord client
+const client = new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMessageReactions,
+        GatewayIntentBits.GuildMembers
+    ]
 });
 
-process.on('SIGINT', () => {
-    console.log('🔄 SIGINT received, shutting down gracefully...');
-    client.destroy();
-    process.exit(0);
+// Health check endpoints (important for Render)
+app.get('/', (req, res) => {
+    res.json({ 
+        status: 'Minecraft Tracker Bot is running!', 
+        uptime: Math.floor(process.uptime()),
+        timestamp: new Date().toISOString(),
+        bot_status: client.user ? 'connected' : 'disconnected',
+        memory_usage: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + 'MB'
+    });
 });
 
+app.get('/health', (req, res) => {
+    res.json({ 
+        status: 'healthy', 
+        bot: client.user ? 'connected' : 'disconnected', 
+        guilds: client.guilds.cache.size,
+        nocodb_configured: !!NOCODB_BASE_URL,
+        uptime: Math.floor(process.uptime())
+    });
+});
+
+// Keep-alive endpoint for external monitoring
+app.get('/ping', (req, res) => {
+    res.status(200).send('pong');
+});
+
+// Discord bot event handlers
 client.once('ready', async () => {
-    console.log(`✅ Minecraft Tracker Bot is online as ${client.user.tag}`);
-    console.log(`📡 Monitoring bump channel: ${BUMP_CHANNEL_ID}`);
+    console.log(`✅ Bot online: ${client.user.tag}`);
+    console.log(`📡 Bump channel: ${BUMP_CHANNEL_ID}`);
     console.log(`🖥️ Console channel: ${CONSOLE_CHANNEL_ID}`);
-    console.log(`🗄️ NocoDB configured: ${NOCODB_BASE_URL ? 'Yes' : 'No'}`);
-    console.log(`🎭 Bump role ID: ${BUMP_ROLE_ID}`);
-    console.log(`🌐 Server running on port: ${PORT}`);
+    console.log(`🗄️ NocoDB: ${NOCODB_BASE_URL ? 'Configured' : 'Not configured'}`);
+    console.log(`🎭 Bump role: ${BUMP_ROLE_ID}`);
+    console.log(`🔒 Hidden users: ${HIDDEN_USERS.length}`);
     
     // Set bot status
-    try {
-        await client.user.setActivity('for server bumps', { type: 'WATCHING' });
-    } catch (error) {
-        console.error('Error setting bot status:', error);
-    }
+    client.user.setPresence({
+        activities: [{ name: 'for server bumps!', type: 'WATCHING' }],
+        status: 'online'
+    });
 });
 
-// Enhanced error handling for connection issues
-client.on('error', (error) => {
-    console.error('Discord client error:', error);
-});
-
-client.on('disconnect', () => {
-    console.log('🔌 Bot disconnected from Discord');
-});
-
-client.on('reconnecting', () => {
-    console.log('🔄 Bot reconnecting to Discord...');
-});
-
-// Listen for bump commands
+// Handle interactions
 client.on('interactionCreate', async (interaction) => {
     if (interaction.channel.id !== BUMP_CHANNEL_ID) return;
     
@@ -93,11 +102,6 @@ client.on('interactionCreate', async (interaction) => {
             await handleBumpDetection(interaction.user);
         }
         
-        if (interaction.isModalSubmit() && interaction.customId === 'minecraft_username_modal') {
-            await handleMinecraftUsernameSubmission(interaction);
-        }
-        
-        // Handle role assignment confirmation buttons
         if (interaction.isButton()) {
             if (interaction.customId === 'confirm_role_assignment') {
                 await handleRoleConfirmation(interaction, true);
@@ -107,27 +111,18 @@ client.on('interactionCreate', async (interaction) => {
         }
     } catch (error) {
         console.error('Error handling interaction:', error);
-        if (!interaction.replied && !interaction.deferred) {
-            try {
-                await interaction.reply({ content: '❌ An error occurred. Please try again.', ephemeral: true });
-            } catch (replyError) {
-                console.error('Error sending error reply:', replyError);
-            }
-        }
     }
 });
 
-// Listen for bump bot responses to detect who bumped
+// Handle messages
 client.on('messageCreate', async (message) => {
     if (message.channel.id !== BUMP_CHANNEL_ID) return;
     
     try {
-        // Handle user commands (non-bot messages starting with !)
         if (!message.author.bot && message.content.startsWith('!')) {
             return handleUserCommands(message);
         }
         
-        // Handle bot messages for bump detection
         if (message.author.bot) {
             await detectBumpBotResponse(message);
         }
@@ -136,12 +131,13 @@ client.on('messageCreate', async (message) => {
     }
 });
 
+// Bump detection functions
 async function detectBumpBotResponse(message) {
     const knownBumpBots = [
         '302050872383242240', // Disboard
         '716390085896962058', // Bump.ly
         '450100127256936458', // ServerHound
-        '1382299188095746088'  // Another bump bot
+        '1382299188095746088'
     ];
     
     const bumpBotPatterns = [
@@ -155,7 +151,6 @@ async function detectBumpBotResponse(message) {
         const content = message.content || '';
         let isMatch = bumpBotPatterns.some(pattern => pattern.test(content));
 
-        // Check embeds for bump confirmation
         let embedText = '';
         if (message.embeds.length) {
             for (const embed of message.embeds) {
@@ -165,26 +160,20 @@ async function detectBumpBotResponse(message) {
         isMatch = isMatch || bumpBotPatterns.some(p => p.test(embedText));
 
         if (isMatch) {
-            console.log(`🚀 Detected bump from bot: ${message.author.tag}`);
+            console.log(`🚀 Bump detected from: ${message.author.tag}`);
             
-            // Try to find who triggered the bump by looking at recent messages
-            try {
-                const recentMessages = await message.channel.messages.fetch({ limit: 10 });
-                let bumpUser = null;
-                
-                // Look for slash command interactions or messages that might indicate who bumped
-                for (const msg of recentMessages.values()) {
-                    if (msg.interaction && msg.interaction.commandName === 'bump') {
-                        bumpUser = msg.interaction.user;
-                        break;
-                    }
+            const recentMessages = await message.channel.messages.fetch({ limit: 10 });
+            let bumpUser = null;
+            
+            for (const msg of recentMessages.values()) {
+                if (msg.interaction && msg.interaction.commandName === 'bump') {
+                    bumpUser = msg.interaction.user;
+                    break;
                 }
-                
-                if (bumpUser) {
-                    await handleBumpDetection(bumpUser);
-                }
-            } catch (error) {
-                console.error('Error fetching recent messages:', error);
+            }
+            
+            if (bumpUser) {
+                await handleBumpDetection(bumpUser);
             }
         }
     }
@@ -192,57 +181,45 @@ async function detectBumpBotResponse(message) {
 
 async function handleBumpDetection(user) {
     try {
-        console.log(`👤 Processing bump from user: ${user.tag} (${user.id})`);
+        console.log(`👤 Processing bump: ${user.tag}`);
         
-        // Check if user exists in NocoDB with timeout handling
         const userRecord = await getUserFromNocoDB(user.id);
         
         if (userRecord && userRecord.minecraft_username) {
-            // User exists with Minecraft username
-            await sendBumpRewardMessage(user, userRecord.minecraft_username);
+            const isHiddenUser = HIDDEN_USERS.includes(user.id);
+            await sendBumpRewardMessage(user, userRecord.minecraft_username, isHiddenUser);
             await sendConsoleCommand(userRecord.minecraft_username);
         } else {
-            // User doesn't exist or doesn't have Minecraft username
             await promptForMinecraftUsername(user);
         }
     } catch (error) {
-        console.error('Error handling bump detection:', error);
+        console.error('Error handling bump:', error);
     }
 }
 
+// NocoDB functions with timeout and retry logic
 async function getUserFromNocoDB(discordId) {
-    if (!NOCODB_BASE_URL || !NOCODB_API_TOKEN) {
-        console.log('NocoDB not configured, skipping database lookup');
-        return null;
-    }
-    
     try {
         const response = await axios.get(
             `${NOCODB_BASE_URL}/api/v2/tables/${NOCODB_TABLE_ID}/records`,
             {
                 ...nocodbConfig,
-                params: {
-                    where: `(discord_id,eq,${discordId})`
-                }
+                params: { where: `(discord_id,eq,${discordId})` },
+                timeout: 10000 // 10 second timeout
             }
         );
         
-        if (response.data && response.data.list && response.data.list.length > 0) {
+        if (response.data?.list?.length > 0) {
             return response.data.list[0];
         }
         return null;
     } catch (error) {
-        console.error('Error fetching user from NocoDB:', error);
+        console.error('Error fetching user from NocoDB:', error.message);
         return null;
     }
 }
 
 async function addUserToNocoDB(discordId, discordUsername, minecraftUsername) {
-    if (!NOCODB_BASE_URL || !NOCODB_API_TOKEN) {
-        console.log('NocoDB not configured, skipping database insert');
-        return null;
-    }
-    
     try {
         const response = await axios.post(
             `${NOCODB_BASE_URL}/api/v2/tables/${NOCODB_TABLE_ID}/records`,
@@ -252,22 +229,20 @@ async function addUserToNocoDB(discordId, discordUsername, minecraftUsername) {
                 minecraft_username: minecraftUsername,
                 created_at: new Date().toISOString()
             },
-            nocodbConfig
+            {
+                ...nocodbConfig,
+                timeout: 10000
+            }
         );
         
         return response.data;
     } catch (error) {
-        console.error('Error adding user to NocoDB:', error);
+        console.error('Error adding user to NocoDB:', error.message);
         throw error;
     }
 }
 
 async function updateUserInNocoDB(recordId, minecraftUsername) {
-    if (!NOCODB_BASE_URL || !NOCODB_API_TOKEN) {
-        console.log('NocoDB not configured, skipping database update');
-        return null;
-    }
-    
     try {
         const response = await axios.patch(
             `${NOCODB_BASE_URL}/api/v2/tables/${NOCODB_TABLE_ID}/records/${recordId}`,
@@ -275,36 +250,40 @@ async function updateUserInNocoDB(recordId, minecraftUsername) {
                 minecraft_username: minecraftUsername,
                 updated_at: new Date().toISOString()
             },
-            nocodbConfig
+            {
+                ...nocodbConfig,
+                timeout: 10000
+            }
         );
         
         return response.data;
     } catch (error) {
-        console.error('Error updating user in NocoDB:', error);
+        console.error('Error updating user in NocoDB:', error.message);
         throw error;
     }
 }
 
+// Role management functions
 async function assignBumpRole(user, guild) {
     try {
         const member = await guild.members.fetch(user.id);
         const role = guild.roles.cache.get(BUMP_ROLE_ID);
         
         if (!role) {
-            console.error(`❌ Bump role not found: ${BUMP_ROLE_ID}`);
+            console.error(`❌ Role not found: ${BUMP_ROLE_ID}`);
             return false;
         }
         
         if (member.roles.cache.has(BUMP_ROLE_ID)) {
-            console.log(`👤 User ${user.tag} already has bump role`);
+            console.log(`👤 ${user.tag} already has role`);
             return true;
         }
         
         await member.roles.add(role);
-        console.log(`✅ Assigned bump role to ${user.tag}`);
+        console.log(`✅ Role assigned to ${user.tag}`);
         return true;
     } catch (error) {
-        console.error(`❌ Error assigning bump role to ${user.tag}:`, error);
+        console.error(`❌ Error assigning role:`, error.message);
         return false;
     }
 }
@@ -312,8 +291,11 @@ async function assignBumpRole(user, guild) {
 async function requestRoleAssignmentConfirmation(user, guild, minecraftUsername) {
     try {
         const bumpChannel = client.channels.cache.get(BUMP_CHANNEL_ID);
-        if (!bumpChannel) {
-            console.error('Bump channel not found');
+        if (!bumpChannel) return;
+        
+        const member = await guild.members.fetch(user.id);
+        if (member.roles.cache.has(BUMP_ROLE_ID)) {
+            console.log(`👤 ${user.tag} already has role`);
             return;
         }
         
@@ -329,20 +311,17 @@ async function requestRoleAssignmentConfirmation(user, guild, minecraftUsername)
             .setStyle(ButtonStyle.Secondary)
             .setEmoji('❌');
         
-        const row = new ActionRowBuilder()
-            .addComponents(confirmButton, declineButton);
+        const row = new ActionRowBuilder().addComponents(confirmButton, declineButton);
         
         const embed = new EmbedBuilder()
             .setColor('#FFA500')
-            .setTitle('🎭 Role Assignment Confirmation')
-            .setDescription(`${user}, would you like to receive the **Bump Role**?`)
+            .setTitle('🎭 Role Assignment')
+            .setDescription(`${user}, would you like the **Bump Role**?`)
             .addFields(
-                { name: '🎯 Benefits', value: 'Get notified about server events and special perks for active bumpers!' },
-                { name: '⏱️ Time Limit', value: 'You have 120 seconds to respond. No response = no role assigned.' }
+                { name: '🎯 Benefits', value: 'Get notified about server events!' },
+                { name: '⏱️ Time Limit', value: '2 minutes to respond' }
             )
-            .setThumbnail(user.displayAvatarURL({ dynamic: true }))
-            .setTimestamp()
-            .setFooter({ text: 'Choose wisely!' });
+            .setTimestamp();
         
         const message = await bumpChannel.send({ 
             content: `${user}`,
@@ -350,10 +329,10 @@ async function requestRoleAssignmentConfirmation(user, guild, minecraftUsername)
             components: [row] 
         });
         
-        // Store pending assignment with timeout
+        // Store with timeout
         const timeoutId = setTimeout(async () => {
-            await handleRoleTimeout(user.id, message);
-        }, 120000); // 120 seconds
+            await handleRoleTimeout(user.id, message, minecraftUsername);
+        }, 120000);
         
         pendingRoleAssignments.set(user.id, {
             guild: guild,
@@ -362,9 +341,8 @@ async function requestRoleAssignmentConfirmation(user, guild, minecraftUsername)
             timeoutId: timeoutId
         });
         
-        console.log(`⏰ Role assignment confirmation requested for ${user.tag}`);
     } catch (error) {
-        console.error('Error requesting role assignment confirmation:', error);
+        console.error('Error requesting role confirmation:', error);
     }
 }
 
@@ -375,80 +353,61 @@ async function handleRoleConfirmation(interaction, confirmed) {
         
         if (!pendingAssignment) {
             await interaction.reply({
-                content: '❌ No pending role assignment found or it has expired.',
+                content: '❌ No pending assignment found.',
                 ephemeral: true
             });
             return;
         }
         
-        // Clear the timeout
         clearTimeout(pendingAssignment.timeoutId);
         pendingRoleAssignments.delete(userId);
         
         if (confirmed) {
-            // Assign the role
             const roleAssigned = await assignBumpRole(interaction.user, pendingAssignment.guild);
             
             if (roleAssigned) {
                 const embed = new EmbedBuilder()
                     .setColor('#00FF00')
-                    .setTitle('✅ Role Assigned Successfully!')
+                    .setTitle('✅ Role Assigned!')
                     .setDescription(`Welcome to the bump team, ${interaction.user}! 🎉`)
-                    .addFields(
-                        { name: '🎭 Role', value: 'Bump Role', inline: true },
-                        { name: '🎮 Minecraft Username', value: pendingAssignment.minecraftUsername, inline: true }
-                    )
-                    .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true }))
                     .setTimestamp();
                 
                 await interaction.update({ embeds: [embed], components: [] });
                 
-                // Send bump reward message and console command
-                await sendBumpRewardMessage(interaction.user, pendingAssignment.minecraftUsername);
+                const isHiddenUser = HIDDEN_USERS.includes(interaction.user.id);
+                await sendBumpRewardMessage(interaction.user, pendingAssignment.minecraftUsername, isHiddenUser);
                 await sendConsoleCommand(pendingAssignment.minecraftUsername);
+                
+                setTimeout(() => interaction.message.delete().catch(() => {}), 10000);
             } else {
                 await interaction.update({
-                    content: '❌ Failed to assign role. Please contact an administrator.',
+                    content: '❌ Failed to assign role.',
                     embeds: [],
                     components: []
                 });
             }
         } else {
-            // User declined the role
             const embed = new EmbedBuilder()
                 .setColor('#808080')
-                .setTitle('👋 Role Assignment Declined')
-                .setDescription(`No problem, ${interaction.user}! You can always ask for the role later.`)
-                .addFields(
-                    { name: '🎮 Minecraft Username', value: pendingAssignment.minecraftUsername, inline: true },
-                    { name: '💡 Note', value: 'Your username is still saved and you\'ll get rewards for bumping!' }
-                )
+                .setTitle('👋 Role Declined')
+                .setDescription(`No problem, ${interaction.user}!`)
                 .setTimestamp();
             
             await interaction.update({ embeds: [embed], components: [] });
             
-            // Still send bump reward message and console command even if role is declined
-            await sendBumpRewardMessage(interaction.user, pendingAssignment.minecraftUsername);
+            const isHiddenUser = HIDDEN_USERS.includes(interaction.user.id);
+            await sendBumpRewardMessage(interaction.user, pendingAssignment.minecraftUsername, isHiddenUser);
             await sendConsoleCommand(pendingAssignment.minecraftUsername);
+            
+            setTimeout(() => interaction.message.delete().catch(() => {}), 10000);
         }
         
-        console.log(`🎭 Role assignment ${confirmed ? 'confirmed' : 'declined'} by ${interaction.user.tag}`);
     } catch (error) {
         console.error('Error handling role confirmation:', error);
-        if (!interaction.replied && !interaction.deferred) {
-            try {
-                await interaction.reply({
-                    content: '❌ An error occurred while processing your response.',
-                    ephemeral: true
-                });
-            } catch (replyError) {
-                console.error('Error sending error reply:', replyError);
-            }
-        }
     }
 }
 
-async function handleRoleTimeout(userId, message) {
+async function handleRoleTimeout(userId, message, minecraftUsername) {
     try {
         const pendingAssignment = pendingRoleAssignments.get(userId);
         if (!pendingAssignment) return;
@@ -457,148 +416,90 @@ async function handleRoleTimeout(userId, message) {
         
         const embed = new EmbedBuilder()
             .setColor('#FF6B6B')
-            .setTitle('⏰ Role Assignment Timed Out')
-            .setDescription('No response received within 120 seconds. Role assignment skipped.')
-            .addFields(
-                { name: '🎮 Minecraft Username', value: pendingAssignment.minecraftUsername, inline: true },
-                { name: '💡 Note', value: 'You can still get the role by using the `!minecraft` command again!' }
-            )
+            .setTitle('⏰ Timed Out')
+            .setDescription('No response received. Role skipped.')
             .setTimestamp();
         
         await message.edit({ embeds: [embed], components: [] });
         
-        // Still send bump reward message and console command even if timeout occurred
         const user = await client.users.fetch(userId);
-        await sendBumpRewardMessage(user, pendingAssignment.minecraftUsername);
-        await sendConsoleCommand(pendingAssignment.minecraftUsername);
+        const isHiddenUser = HIDDEN_USERS.includes(userId);
+        await sendBumpRewardMessage(user, minecraftUsername, isHiddenUser);
+        await sendConsoleCommand(minecraftUsername);
         
-        console.log(`⏰ Role assignment timed out for user ID: ${userId}`);
+        setTimeout(() => message.delete().catch(() => {}), 10000);
+        
     } catch (error) {
-        console.error('Error handling role timeout:', error);
+        console.error('Error handling timeout:', error);
     }
 }
 
-async function sendBumpRewardMessage(user, minecraftUsername) {
+// Message functions
+async function sendBumpRewardMessage(user, minecraftUsername, isHiddenUser = false) {
     try {
         const bumpChannel = client.channels.cache.get(BUMP_CHANNEL_ID);
-        if (!bumpChannel) {
-            console.error('Bump channel not found');
-            return;
-        }
+        if (!bumpChannel) return;
+        
+        const displayUsername = isHiddenUser ? '***Hidden***' : minecraftUsername;
         
         const embed = new EmbedBuilder()
             .setColor('#00FF00')
-            .setTitle('🎮 Bump Detected - User Found!')
-            .setDescription(`User ${user} has bumped the server`)
+            .setTitle('🎮 Bump Detected - Reward Sent!')
+            .setDescription(`${user} bumped the server! 🎁`)
             .addFields(
-                { name: '🎯 Minecraft Username', value: minecraftUsername, inline: true },
-                { name: '⏰ Time', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
+                { name: '🎯 Minecraft Username', value: displayUsername, inline: true },
+                { name: '⏰ Time', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true },
+                { name: '💰 Rewards', value: '• 1x Balanced Crate Key\n• 3 minutes Temp Fly', inline: false }
             )
-            .setThumbnail(user.displayAvatarURL({ dynamic: true }))
-            .setTimestamp()
-            .setFooter({ text: 'Minecraft Tracker Bot' });
+            .setTimestamp();
         
-        await bumpChannel.send({ content: `${user} Your reward has been sent! 🎁`, embeds: [embed] });
-        console.log(`✅ Sent bump reward message for ${user.tag} with Minecraft username: ${minecraftUsername}`);
+        await bumpChannel.send({ embeds: [embed] });
+        console.log(`✅ Reward message sent for ${user.tag}`);
     } catch (error) {
-        console.error('Error sending bump reward message:', error);
+        console.error('Error sending reward message:', error);
     }
 }
 
 async function sendConsoleCommand(minecraftUsername) {
     try {
         const consoleChannel = client.channels.cache.get(CONSOLE_CHANNEL_ID);
-        if (!consoleChannel) {
-            console.error('Console channel not found');
-            return;
-        }
+        if (!consoleChannel) return;
         
-        const command = `crate key give ${minecraftUsername} balanced 1 offline`;
-        const command1 = `tempfly give ${minecraftUsername} 3m`;
-        await consoleChannel.send(command);
+        const command1 = `crate key give ${minecraftUsername} balanced 1 offline`;
+        const command2 = `tempfly give ${minecraftUsername} 3m`;
+        
         await consoleChannel.send(command1);
-        console.log(`💰 Sent console command: ${command}`);
+        await consoleChannel.send(command2);
+        console.log(`💰 Console commands sent for ${minecraftUsername}`);
     } catch (error) {
-        console.error('Error sending console command:', error);
+        console.error('Error sending console commands:', error);
     }
 }
 
 async function promptForMinecraftUsername(user) {
     try {
-        // Send a message in the bump channel with instructions
         const bumpChannel = client.channels.cache.get(BUMP_CHANNEL_ID);
-        if (bumpChannel) {
-            const embed = new EmbedBuilder()
-                .setColor('#FFA500')
-                .setTitle('🎮 Minecraft Username Required')
-                .setDescription(`${user}, thanks for bumping! We need your Minecraft username to track your contribution.`)
-                .addFields(
-                    { name: '📝 Next Steps', value: 'Please use the `!minecraft <username>` command to set your username' },
-                    { name: '❓ Why?', value: 'This helps us track server bumps and reward active members' },
-                    { name: '📖 Example', value: '`!minecraft Steve123`' }
-                )
-                .setTimestamp()
-                .setFooter({ text: 'Use !minecraft <username> to set your username' });
-            
-            await bumpChannel.send({ content: `${user}`, embeds: [embed] });
-        }
+        if (!bumpChannel) return;
         
-        console.log(`❓ Prompted ${user.tag} for Minecraft username`);
+        const embed = new EmbedBuilder()
+            .setColor('#FFA500')
+            .setTitle('🎮 Minecraft Username Required')
+            .setDescription(`${user}, thanks for bumping! Set your Minecraft username.`)
+            .addFields(
+                { name: '📝 Command', value: '`!minecraft <username>`' },
+                { name: '📖 Example', value: '`!minecraft Steve123`' }
+            )
+            .setTimestamp();
+        
+        const message = await bumpChannel.send({ content: `${user}`, embeds: [embed] });
+        setTimeout(() => message.delete().catch(() => {}), 120000);
+        
     } catch (error) {
-        console.error('Error prompting for Minecraft username:', error);
+        console.error('Error prompting for username:', error);
     }
 }
 
-async function handleMinecraftUsernameSubmission(interaction) {
-    try {
-        const minecraftUsername = interaction.fields.getTextInputValue('minecraft_username_input');
-        const user = interaction.user;
-        
-        // Validate Minecraft username (basic validation)
-        if (!/^[a-zA-Z0-9_]{3,16}$/.test(minecraftUsername)) {
-            await interaction.reply({
-                content: '❌ Invalid Minecraft username! It should be 3-16 characters long and contain only letters, numbers, and underscores.',
-                ephemeral: true
-            });
-            return;
-        }
-        
-        // Check if user already exists in database
-        const existingUser = await getUserFromNocoDB(user.id);
-        
-        if (existingUser) {
-            // Update existing user
-            await updateUserInNocoDB(existingUser.Id, minecraftUsername);
-        } else {
-            // Add new user
-            await addUserToNocoDB(user.id, user.tag, minecraftUsername);
-        }
-        
-        // Send success message
-        await interaction.reply({
-            content: `✅ Successfully saved your Minecraft username: **${minecraftUsername}**\n\nNext time you bump, we'll automatically track it!`,
-            ephemeral: true
-        });
-        
-        // Request role assignment confirmation
-        await requestRoleAssignmentConfirmation(user, interaction.guild, minecraftUsername);
-        
-        console.log(`✅ Added/Updated Minecraft username for ${user.tag}: ${minecraftUsername}`);
-    } catch (error) {
-        console.error('Error handling Minecraft username submission:', error);
-        if (!interaction.replied && !interaction.deferred) {
-            try {
-                await interaction.reply({
-                    content: '❌ An error occurred while saving your username. Please try again later.',
-                    ephemeral: true
-                });
-            } catch (replyError) {
-                console.error('Error sending error reply:', replyError);
-            }
-        }
-    }
-}
-
+// User commands
 async function handleUserCommands(message) {
     const args = message.content.slice(1).trim().split(/ +/);
     const command = args.shift().toLowerCase();
@@ -610,128 +511,100 @@ async function handleUserCommands(message) {
 
 async function handleMinecraftCommand(message, args) {
     try {
+        message.delete().catch(() => {});
+        
         if (args.length === 0) {
             const embed = new EmbedBuilder()
                 .setColor('#FFA500')
                 .setTitle('❌ Missing Username')
-                .setDescription('Please provide your Minecraft username!')
-                .addFields(
-                    { name: '📝 Usage', value: '`!minecraft <username>`' },
-                    { name: '📖 Example', value: '`!minecraft Steve123`' }
-                )
+                .setDescription(`${message.author}, provide your Minecraft username!`)
+                .addFields({ name: '📝 Usage', value: '`!minecraft <username>`' })
                 .setTimestamp();
             
-            return message.reply({ embeds: [embed] });
+            const reply = await message.channel.send({ embeds: [embed] });
+            setTimeout(() => reply.delete().catch(() => {}), 30000);
+            return;
         }
         
         const minecraftUsername = args[0];
         
-        // Validate Minecraft username
         if (!/^[a-zA-Z0-9_]{3,16}$/.test(minecraftUsername)) {
             const embed = new EmbedBuilder()
                 .setColor('#FF0000')
                 .setTitle('❌ Invalid Username')
-                .setDescription('Minecraft usernames must be 3-16 characters long and contain only letters, numbers, and underscores.')
-                .addFields(
-                    { name: '📝 Valid Examples', value: '`Steve`, `Notch`, `Player123`, `Cool_Gamer`' },
-                    { name: '❌ Invalid Examples', value: '`AB`, `ThisNameIsTooLong123`, `Player-123`, `User@123`' }
-                )
+                .setDescription(`${message.author}, username must be 3-16 characters (letters, numbers, underscores only).`)
                 .setTimestamp();
             
-            return message.reply({ embeds: [embed] });
+            const reply = await message.channel.send({ embeds: [embed] });
+            setTimeout(() => reply.delete().catch(() => {}), 30000);
+            return;
         }
         
-        // Check if user already exists in database
         const existingUser = await getUserFromNocoDB(message.author.id);
+        let isUpdate = false;
         
         if (existingUser) {
-            // Update existing user
             await updateUserInNocoDB(existingUser.Id, minecraftUsername);
+            isUpdate = true;
         } else {
-            // Add new user
             await addUserToNocoDB(message.author.id, message.author.tag, minecraftUsername);
         }
         
-        // Send success message
         const embed = new EmbedBuilder()
             .setColor('#00FF00')
-            .setTitle('✅ Success!')
-            .setDescription(`Successfully saved your Minecraft username: **${minecraftUsername}**`)
-            .addFields(
-                { name: '🎮 Username Set', value: minecraftUsername, inline: true },
-                { name: '📝 Next Step', value: 'Bump the server to get your rewards!' }
-            )
-            .setThumbnail(message.author.displayAvatarURL({ dynamic: true }))
-            .setTimestamp()
-            .setFooter({ text: 'Minecraft Tracker Bot' });
+            .setTitle(isUpdate ? '✅ Username Updated!' : '✅ Registration Successful!')
+            .setDescription(`${message.author}, username ${isUpdate ? 'updated' : 'registered'}: **${minecraftUsername}**`)
+            .setTimestamp();
         
-        await message.reply({ embeds: [embed] });
+        const reply = await message.channel.send({ embeds: [embed] });
+        setTimeout(() => reply.delete().catch(() => {}), 60000);
         
-        // Request role assignment confirmation
-        await requestRoleAssignmentConfirmation(message.author, message.guild, minecraftUsername);
+        if (!isUpdate || !await checkUserHasRole(message.author, message.guild)) {
+            await requestRoleAssignmentConfirmation(message.author, message.guild, minecraftUsername);
+        }
         
-        console.log(`✅ User ${message.author.tag} set Minecraft username via !minecraft: ${minecraftUsername}`);
+        console.log(`✅ ${message.author.tag} ${isUpdate ? 'updated' : 'set'} username: ${minecraftUsername}`);
+        
     } catch (error) {
-        console.error('Error handling !minecraft command:', error);
+        console.error('Error handling minecraft command:', error);
         
         const embed = new EmbedBuilder()
             .setColor('#FF0000')
             .setTitle('❌ Error')
-            .setDescription('An error occurred while saving your username. Please try again later.')
+            .setDescription(`${message.author}, error occurred. Try again later.`)
             .setTimestamp();
         
-        try {
-            await message.reply({ embeds: [embed] });
-        } catch (replyError) {
-            console.error('Error sending error reply:', replyError);
-        }
+        const reply = await message.channel.send({ embeds: [embed] });
+        setTimeout(() => reply.delete().catch(() => {}), 30000);
     }
 }
 
-// Health check endpoints for Render
-app.get('/', (req, res) => {
-    res.json({ 
-        status: 'Minecraft Tracker Bot is running!', 
-        uptime: process.uptime(), 
-        timestamp: new Date().toISOString(),
-        bot_status: client.user ? 'connected' : 'disconnected',
-        environment: 'render'
-    });
+async function checkUserHasRole(user, guild) {
+    try {
+        const member = await guild.members.fetch(user.id);
+        return member.roles.cache.has(BUMP_ROLE_ID);
+    } catch (error) {
+        console.error('Error checking user role:', error);
+        return false;
+    }
+}
+
+// Start the server
+app.listen(PORT, () => {
+    console.log(`🌐 Server running on port ${PORT}`);
 });
 
-app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'healthy', 
-        bot: client.user ? 'connected' : 'disconnected', 
-        guilds: client.guilds.cache.size,
-        nocodb_configured: !!NOCODB_BASE_URL,
-        uptime: process.uptime()
-    });
-});
-
-// Additional endpoint for monitoring
-app.get('/status', (req, res) => {
-    res.json({
-        online: !!client.user,
-        guilds: client.guilds.cache.size,
-        uptime: process.uptime(),
-        memory: process.memoryUsage()
-    });
-});
-
-// Start the Express server
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🌐 Keep-alive server running on port ${PORT}`);
-    console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
-});
-
-// Enhanced error handling
+// Error handling
 client.on('error', (error) => {
     console.error('Discord client error:', error);
 });
 
-client.on('shardError', (error) => {
-    console.error('Shard error:', error);
+client.on('disconnect', () => {
+    console.log('❌ Bot disconnected');
+});
+
+client.on('reconnecting', () => {
+    console.log('🔄 Bot reconnecting');
 });
 
 process.on('unhandledRejection', (error) => {
@@ -740,22 +613,28 @@ process.on('unhandledRejection', (error) => {
 
 process.on('uncaughtException', (error) => {
     console.error('Uncaught exception:', error);
-    process.exit(1);
 });
 
-// Login to Discord with enhanced error handling
-async function startBot() {
-    try {
-        if (!DISCORD_BOT_TOKEN) {
-            throw new Error('DISCORD_BOT_TOKEN is not set in environment variables');
-        }
-        
-        await client.login(DISCORD_BOT_TOKEN);
-        console.log('🤖 Discord bot logged in successfully');
-    } catch (error) {
-        console.error('Failed to start Discord bot:', error);
-        process.exit(1);
-    }
+// Graceful shutdown
+process.on('SIGTERM', () => {
+    console.log('SIGTERM received, shutting down gracefully');
+    client.destroy();
+    process.exit(0);
+});
+
+process.on('SIGINT', () => {
+    console.log('SIGINT received, shutting down gracefully');
+    client.destroy();
+    process.exit(0);
+});
+
+// Login to Discord
+if (!DISCORD_BOT_TOKEN) {
+    console.error('❌ DISCORD_BOT_TOKEN is required');
+    process.exit(1);
 }
 
-startBot();
+client.login(DISCORD_BOT_TOKEN).catch((error) => {
+    console.error('❌ Failed to login:', error);
+    process.exit(1);
+});
