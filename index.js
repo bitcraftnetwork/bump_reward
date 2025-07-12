@@ -24,9 +24,10 @@ const BUMP_ROLE_ID = process.env.BUMP_ROLE_ID || '1382278107024851005';
 // Hidden users configuration - Discord user IDs whose Minecraft usernames should be hidden
 const HIDDEN_USERS = [
     // Add Discord user IDs here whose Minecraft usernames should be hidden from public messages
-    // Example: "123456789012345678",
-    // Example: "987654321098765432",
-    // Example: "111222333444555666"
+    851409275010940948,
+    710833692490203156,
+    680123642557759539,
+    466884574081843202
 ];
 
 // In-memory storage for pending role assignments (will reset on restart)
